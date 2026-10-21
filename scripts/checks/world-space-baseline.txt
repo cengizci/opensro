@@ -2,4 +2,3 @@
 # or raw `0x8000` region-bit tests predating world-space.ts (#1279).
 # Format: `<path> <count>`. This ledger may only shrink; run
 # `node scripts/checks/check_world_space.mjs --update` after migrating a file.
-apps/client-next/src/engine/foundation/animation/character-selection.ts 2
