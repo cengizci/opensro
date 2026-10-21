@@ -71,16 +71,29 @@ Whether the actor runs the native +0x114 pursuit callback
 (CAITactics_PursueTargetWithDirectionGate at 0x00548BE0 outdoors,
 CAITactics_PursueTargetWithRegionRoute at 0x00549460 in dungeons).
 0x0053FC00 installs 0x00548BE0 unconditionally in slot +0x114; Flags bits
-0x04 and 0x80 replace only slot +0x100 (target check), not +0x114. Summoned
-monsters whose summon-tactics row omits a full TacticsControls block still
-carry SummonerGID != 0 and use the same +0x114 pursuit.
+0x04 and 0x80 replace only slot +0x100 (target check), not +0x114.
+
+A spawn without a TacticsControls row resolves its tactics from the spawn
+table alone (CGameAI_SelectSpawnTactics at 0x0054C0E0, called with
+dwTacticsID == 0 at 0x005EBAA6), so FleeType and BattleStyle are whatever
+that row leaves, and a row without them is zero on both counts: the
+pursuit callback is installed for it as well. A summoned monster carries
+SummonerGID != 0; a scripted or GM spawn carries a detached, policy-pinned
+nest instead. Native resolves the tactics once, when the monster is
+spawned, so a monster that loses its nest slot later (53FD40) keeps the
+tactics it came with. A nest that never resolved a spawn table row - a
+resource-authored area nest, or a nest that was never pinned - has no row
+to read and stays out.
 ================
 */
 func ordinarySquadApproach(actor monster.Instance) bool {
 	if actor.Nest.HasControls {
 		return actor.Nest.Controls.FleeType == 0 && actor.Nest.Controls.BattleStyle == 0
 	}
-	return actor.SummonerGID != 0
+	if actor.SummonerGID != 0 {
+		return true
+	}
+	return actor.NestDetached && actor.Nest.PolicyPinned
 }
 
 /*
