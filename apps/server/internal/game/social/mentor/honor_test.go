@@ -13,6 +13,7 @@ import (
 	"bytes"
 	"encoding/binary"
 	"path/filepath"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -20,7 +21,119 @@ import (
 	"opensro.online/server/internal/game/enterworld"
 	"opensro.online/server/internal/game/item/wire"
 	"opensro.online/server/internal/game/social/mentor"
+	"opensro.online/server/internal/testsupport/wait"
 )
+
+/*
+================
+campGraduateGrant
+
+The graduate EXP grant the mentor runtime hands to the world through
+GrantGraduateExperience. The grant is produced on the session goroutine
+and read on the test goroutine, so it travels over a channel: a shared
+variable would be a data race, and reading it behind an unrelated frame
+would be a timing bug.
+================
+*/
+type campGraduateGrant struct {
+	charID int64
+	exp    int64
+}
+
+/*
+================
+campRankRecorder
+
+Records the mentor runtime's honor-rank syncs. The runtime calls the
+hook from a session goroutine, so the recorder owns the channel and the
+test drains it between phases; a shared slice would be a data race.
+================
+*/
+type campRankRecorder struct {
+	ranks chan uint8
+}
+
+/*
+==================
+newCampRankRecorder
+==================
+*/
+func newCampRankRecorder() *campRankRecorder {
+	return &campRankRecorder{ranks: make(chan uint8, 64)}
+}
+
+/*
+================
+record
+================
+*/
+func (r *campRankRecorder) record(evaluationRank uint8) {
+	r.ranks <- evaluationRank
+}
+
+/*
+================
+drain
+
+Removes every recorded rank and returns them in arrival order. The test
+drains before a phase whose result it wants to observe on its own, so a
+late sync from an earlier phase cannot be mistaken for the phase's own
+sync.
+================
+*/
+func (r *campRankRecorder) drain() []uint8 {
+	var out []uint8
+	for {
+		select {
+		case rank := <-r.ranks:
+			out = append(out, rank)
+		default:
+			return out
+		}
+	}
+}
+
+/*
+================
+campClock
+
+The mentor runtime's clock. The runtime reads it from its session
+goroutines while the test advances it between phases, so the value lives
+in an atomic counter instead of a shared variable.
+================
+*/
+type campClock struct {
+	nanos atomic.Int64
+}
+
+/*
+==================
+newCampClock
+==================
+*/
+func newCampClock(start time.Time) *campClock {
+	c := &campClock{}
+	c.nanos.Store(start.UnixNano())
+	return c
+}
+
+/*
+================
+now
+================
+*/
+func (c *campClock) now() time.Time {
+	return time.Unix(0, c.nanos.Load()).UTC()
+}
+
+/*
+================
+advance
+================
+*/
+func (c *campClock) advance(step time.Duration) {
+	c.nanos.Add(int64(step))
+}
 
 type stubLevelData map[int64]int64
 
@@ -58,19 +171,17 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 	}
 	env := startCampServer(t, dir, seeds)
 
-	now := time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC)
-	env.mentorInv.Now = func() time.Time { return now }
+	clock := newCampClock(time.Date(2026, 10, 17, 12, 0, 0, 0, time.UTC))
+	env.mentorInv.Now = clock.now
 	env.mentorInv.LevelData = stubLevelData{40: 1473482}
 
-	var gradCharID int64
-	var gradExp int64
+	grants := make(chan campGraduateGrant, 16)
 	env.mentorInv.GrantGraduateExperience = func(_ string, charID int64, expDelta int64) {
-		gradCharID = charID
-		gradExp = expDelta
+		grants <- campGraduateGrant{charID: charID, exp: expDelta}
 	}
-	var syncedRanks []uint8
+	ranks := newCampRankRecorder()
 	env.mentorInv.SyncMasterHonorBuffs = func(_ string, _ int64, evaluationRank uint8) {
-		syncedRanks = append(syncedRanks, evaluationRank)
+		ranks.record(evaluationRank)
 	}
 
 	wsM := campDialWS(t, env.srv)
@@ -157,7 +268,7 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 			t.Fatalf("0x3AC5 level 40 = % X, want % X", got, wantLvl40Frame)
 		}
 	}
-	now = now.Add(25 * time.Hour)
+	clock.advance(25 * time.Hour)
 	campSendFrame(t, wsS, mentor.OpTCGraduateRequest, []byte{4})
 	if got := campExpectFrame(t, wsS, mentor.OpTCGraduateAnswer, "S graduate ack"); !bytes.Equal(got, []byte{1}) {
 		t.Fatalf("0xB10A = % X, want [01]", got)
@@ -165,8 +276,20 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 	if got := campExpectFrame(t, wsS, mentor.OpTCStatus, "S graduate status-4"); !bytes.Equal(got, mentor.EncodeCampMemberGraduate3AC5(gidS, 0)) {
 		t.Fatalf("S 0x3AC5 graduate = % X", got)
 	}
-	if gradCharID != charS.ID || gradExp != mentor.GraduateBonusExp {
-		t.Fatalf("graduate exp grant = (char %d, exp %d), want (%d, %d)", gradCharID, gradExp, charS.ID, mentor.GraduateBonusExp)
+	// The EXP grant is a separate step of the graduation, not part of the
+	// status-4 frame. Wait for it instead of reading a shared variable
+	// behind an unrelated frame.
+	var grant campGraduateGrant
+	wait.Eventually(t, 5*time.Second, "the graduate EXP grant to arrive", func() bool {
+		select {
+		case grant = <-grants:
+			return true
+		default:
+			return false
+		}
+	})
+	if grant.charID != charS.ID || grant.exp != mentor.GraduateBonusExp {
+		t.Fatalf("graduate exp grant = (char %d, exp %d), want (%d, %d)", grant.charID, grant.exp, charS.ID, mentor.GraduateBonusExp)
 	}
 	// Master receives status-4 graduate, status-5 flag-3 honor points update (39 pts for joinLevel 1), and status-12 eval rank 1 (ranking 1 <= 5).
 	if got := campExpectFrame(t, wsM, mentor.OpTCStatus, "M sees S graduate"); !bytes.Equal(got, mentor.EncodeCampMemberGraduate3AC5(gidS, 0)) {
@@ -279,7 +402,7 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 	campExpectFrame(t, wsI, mentor.OpTCStatus, "I re-join seed")
 	campExpectFrame(t, wsM, mentor.OpTCStatus, "M sees I re-join")
 
-	now = now.Add(25 * time.Hour)
+	clock.advance(25 * time.Hour)
 	campSendFrame(t, wsM, mentor.OpTCKickRequest, campStr(charI.Name))
 	if got := campExpectFrame(t, wsM, mentor.OpTCKickAnswer, "0xB4D4 ack"); !bytes.Equal(got, []byte{1}) {
 		t.Fatalf("0xB4D4 = % X, want [01]", got)
@@ -304,7 +427,7 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 
 	// Advance past 7 days since creation: Master disbands camp (0x77C5 -> 0xB7C5 + 0x3AC5 status-1)
 	// and hits 7-day reopen cooldown on 0x72EC.
-	now = now.Add(6 * 24 * time.Hour)
+	clock.advance(6 * 24 * time.Hour)
 	campSendFrame(t, wsM, mentor.OpTCDisbandRequest, nil)
 	if got := campExpectFrame(t, wsM, mentor.OpTCDisbandAnswer, "0xB7C5 ack"); !bytes.Equal(got, []byte{1}) {
 		t.Fatalf("0xB7C5 = % X, want [01]", got)
@@ -312,12 +435,19 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 	if got := campExpectFrame(t, wsM, mentor.OpTCStatus, "M sees camp dissolved"); !bytes.Equal(got, mentor.EncodeCampDisband3AC5()) {
 		t.Fatalf("M 0x3AC5 dissolve = % X, want [01]", got)
 	}
-	if len(syncedRanks) == 0 || syncedRanks[len(syncedRanks)-1] != 0 {
-		t.Fatalf("syncedRanks = %v, want trailing 0 on disband", syncedRanks)
-	}
+	// The disband resets the master's honor-rank buff, so the runtime syncs
+	// rank 0 for him. Wait for that sync: it lands on the session goroutine.
+	wait.Eventually(t, 5*time.Second, "the disband's honor-rank sync to reach rank 0", func() bool {
+		for _, rank := range ranks.drain() {
+			if rank == 0 {
+				return true
+			}
+		}
+		return false
+	})
 
 	// Attempting to reopen 1 hour later answers 0xB2EC {2, 0x1C, remainingSeconds}.
-	now = now.Add(1 * time.Hour)
+	clock.advance(1 * time.Hour)
 	campSendFrame(t, wsM, mentor.OpTCOpenRequest, campU32(0))
 	waitAns := campExpectFrame(t, wsM, mentor.OpTCOpenAnswer, "7-day reopen cooldown")
 	if len(waitAns) != 6 || waitAns[0] != 2 || waitAns[1] != mentor.OpenErrReopenWait {

@@ -331,6 +331,12 @@ func (r *InviteRuntime) handleGraduate(s *transport.Session, opcode uint16, payl
 		r.broadcastCampStatus(divisionID, res.MembersBefore, gradPush)
 		r.publishGraduationUpdates(divisionID, res)
 		if res.AwardedExp {
+			// The EXP grant rides behind the status-4 broadcast. The native
+			// order between CTrainingCamp_OnMemberGraduatedUpdatePoints
+			// 0x005DDD50 and CTrainingCampMgr_OnGraduateDBSuccess 0x005DFC30
+			// is not documented in the v1.188 sources we hold, so the port
+			// keeps the order it always had and the client sees the grant
+			// after the membership frame. Inference, not a verified order.
 			if bonus := BonusGraduateExp(res.Graduate.JoinLevel, r.LevelData); bonus > 0 && r.GrantGraduateExperience != nil {
 				r.GrantGraduateExperience(divisionID, actor.ID, bonus)
 			}
