@@ -116,6 +116,7 @@ PresentationEventFrame
 */
 interface PresentationEventFrame {
 	readonly entities: readonly EntityState[];
+	readonly selectedGids?: ReadonlySet<number>;
 	readonly gameplay: GameplayState | null;
 	readonly seconds: number;
 	readonly simulationMs: number | undefined;
@@ -203,6 +204,7 @@ export function createPresentationEvents() {
 		) {
 			const {
 				entities,
+				selectedGids,
 				gameplay,
 				seconds,
 				simulationMs,
@@ -280,7 +282,11 @@ export function createPresentationEvents() {
 						heading: held.angle
 					};
 				}
-				if ( !samples.has( entity.gid ) || !localMover( entity.gid ) && !entity.moving ) return entity;
+				if (
+					(selectedGids && !selectedGids.has( entity.gid )) ||
+					!samples.has( entity.gid ) ||
+					!localMover( entity.gid ) && !entity.moving
+				) return entity;
 				const drawn = posePresentation.pose( entity.gid, logicalPose( entity ), seconds );
 				if ( local ) {
 					drawnLocal = { ...gameplay!.pose!, regionId: drawn.regionId, x: drawn.x, y: drawn.y, z: drawn.z };
