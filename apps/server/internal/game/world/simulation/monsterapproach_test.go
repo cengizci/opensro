@@ -14,6 +14,7 @@ package simulation
 
 import (
 	"testing"
+	"time"
 
 	"opensro.online/server/internal/game/world/instance"
 	"opensro.online/server/internal/game/world/monster"
@@ -23,10 +24,10 @@ import (
 ================
 TestOrdinarySquadApproachAdmitsDetachedPolicySpawns
 
-0x0053FC00 installs CAITactics_PursueTargetWithDirectionGate (0x00548BE0)
-in slot +0x114 whenever FleeType and BattleStyle are zero. A dynamic spawn
-carries neither a TacticsControls row nor a summoner, so the two fields
-stay zero and the callback belongs to it.
+0x0053FC00 stores CAITactics_PursueTargetWithDirectionGate (0x00548BE0)
+into slot +0x114 in an unconditional run at function entry (0x0053FC67).
+A dynamic spawn carries neither a TacticsControls row nor a summoner, so
+the callback belongs to it.
 ================
 */
 func TestOrdinarySquadApproachAdmitsDetachedPolicySpawns(t *testing.T) {
@@ -41,6 +42,56 @@ func TestOrdinarySquadApproachAdmitsDetachedPolicySpawns(t *testing.T) {
 		if !ordinarySquadApproach(actor) {
 			t.Fatalf("%s excluded from ordinarySquadApproach (+0x114 0x00548BE0)", name)
 		}
+	}
+}
+
+/*
+================
+TestOrdinarySquadApproachAdmitsAnAuthoredAreaNestAfterItsSlotIsReleased
+
+A resource-authored area nest is policy-pinned and holds its slot, so it
+stays out while it holds it. Releasing the slot (53FD40, through
+detachCrossPlaneNest) leaves the actor detached and policy-pinned, and the
+predicate then admits it. Native installs the callback for every tactics
+instance at its spawn, so admitting the actor after the release is the
+closer of the two approximations. The flip is deliberate, and this test
+pins it on the real detach path.
+================
+*/
+func TestOrdinarySquadApproachAdmitsAnAuthoredAreaNestAfterItsSlotIsReleased(t *testing.T) {
+	registry := NewMonsterState(monster.TemplateFromParts(map[uint32]monster.MonsterRef{
+		1933: {RefObjID: 1933, TidWord: 0x00C6, Codename: "MOB_CH_MANGNYANG", WalkSpeed: 8, RunSpeed: 22, BodyRadius: 6, MaxHP: 54},
+	}, []monster.NestRow{
+		{
+			SpawnPoint:   monster.SpawnPoint{RefObjID: 1933, RegionID: monsterTestRegion, X: 1000, Y: 20, Z: 1000},
+			PolicyPinned: true,
+			MaxCount:     1,
+		},
+	}))
+	registry.StartDivision(monsterTestDivision)
+	registry.AdvancePopulation(time.Now().UnixMilli())
+	actor := monsterInstanceByRef(t, registry, 1933)
+	if ordinarySquadApproach(actor) {
+		t.Fatal("the authored area nest is admitted while it holds its slot")
+	}
+
+	registry.mu.Lock()
+	state := registry.populationForObject(monsterTestDivision, actor.Gid)
+	if !registry.detachNestLocked(state, actor.Gid, time.Now().UnixMilli()) {
+		registry.mu.Unlock()
+		t.Fatal("the authored area nest released no slot")
+	}
+	detached := state.instances.get(actor.Gid)
+	registry.mu.Unlock()
+
+	if !detached.NestDetached {
+		t.Fatal("the released actor is not detached")
+	}
+	if !detached.Nest.PolicyPinned {
+		t.Fatal("the released actor lost its pinned policy")
+	}
+	if !ordinarySquadApproach(detached) {
+		t.Fatal("the released authored area nest stays out of ordinarySquadApproach")
 	}
 }
 
