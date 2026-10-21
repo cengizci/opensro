@@ -428,6 +428,10 @@ func TestAcademyHonorLifecycleGraduationRankKickLeaveDisband(t *testing.T) {
 	// Advance past 7 days since creation: Master disbands camp (0x77C5 -> 0xB7C5 + 0x3AC5 status-1)
 	// and hits 7-day reopen cooldown on 0x72EC.
 	clock.advance(6 * 24 * time.Hour)
+	// World entry synced rank 0 for every character outside a camp, so the
+	// recorder already holds those syncs. Drop them before the disband, or the
+	// wait below would pass on an entry sync instead of the disband's own.
+	ranks.drain()
 	campSendFrame(t, wsM, mentor.OpTCDisbandRequest, nil)
 	if got := campExpectFrame(t, wsM, mentor.OpTCDisbandAnswer, "0xB7C5 ack"); !bytes.Equal(got, []byte{1}) {
 		t.Fatalf("0xB7C5 = % X, want [01]", got)
