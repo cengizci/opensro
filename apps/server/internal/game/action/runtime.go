@@ -77,6 +77,10 @@ type Runtime struct {
 	// instead of tethering it (port-only, SRO_TRANSPORT_FOLLOW; false is
 	// native, transportfollow.go).
 	TransportFollow bool
+	// TransportFollowTether keeps the 100 m tether on a following
+	// transport (port-only, SRO_TRANSPORT_FOLLOW_TETHER; acts only with
+	// TransportFollow on, transportfollow.go).
+	TransportFollowTether bool
 	// JobGoodsTeleport lets a trader with a transport out use town gates,
 	// return scrolls and the reverse return (port-only,
 	// SRO_JOB_GOODS_TELEPORT; false is native, goodsteleport.go).
@@ -673,7 +677,7 @@ type Runtime struct {
 	Stalls          *stall.Registry
 	StallCategories map[[4]int64]uint32
 	// NameFilter is the native name filter (AbuseFilter.txt) player-chosen
-	// names pass (namefilter.go); ConfigureNameFilter loads it.
+	// names pass (namefilter.go), shared with character creation at startup.
 	NameFilter *namefilter.Filter
 	// resurrections holds the unanswered resurrection proposals, one per
 	// dead player (resurrection.go).
