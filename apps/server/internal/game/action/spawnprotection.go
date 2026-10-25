@@ -115,6 +115,19 @@ publish, or nil.
 ================
 */
 func (rt *Runtime) grantReviveUntouchable(division string, character *enterworld.Character, nowMs int64) []wire.Frame {
+	return rt.grantReviveUntouchableInWorld(division, character, instance.ID(domain.CharacterWorldInstance(character)), nowMs)
+}
+
+/*
+================
+grantReviveUntouchableInWorld
+
+The revival's world determines its grace. An event return may publish its
+final destination together with the revival, after logically reviving in
+town; that final relocation must not select a different grace duration.
+================
+*/
+func (rt *Runtime) grantReviveUntouchableInWorld(division string, character *enterworld.Character, world instance.ID, nowMs int64) []wire.Frame {
 	if character.NativeBodyStatus == 3 || character.NativeBodyStatus == 4 {
 		return nil
 	}
@@ -124,7 +137,7 @@ func (rt *Runtime) grantReviveUntouchable(division string, character *enterworld
 		return nil
 	}
 	grace := int64(reviveUntouchableMs)
-	if definition, ok := instance.Lookup(instance.ID(domain.CharacterWorldInstance(character)).Definition()); ok && definition.Siege() {
+	if definition, ok := instance.Lookup(world.Definition()); ok && definition.Siege() {
 		grace = siegeReviveUntouchableMs
 	}
 	rt.bodyRestores.schedule(bodyRestore{

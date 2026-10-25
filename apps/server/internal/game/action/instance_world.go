@@ -34,6 +34,7 @@ import (
 
 	"opensro.online/server/internal/domain"
 	"opensro.online/server/internal/game/enterworld"
+	"opensro.online/server/internal/game/item/wire"
 	"opensro.online/server/internal/game/world/instance"
 	"opensro.online/server/internal/game/world/simulation"
 )
@@ -222,9 +223,10 @@ ReturnCharacterFromInstance
 
 Brings one character back to the world and pose its transfer anchor
 recorded, and clears the anchor. A character with no anchor was never
-transferred by this lane and is answered NotMember. The return itself is
-a relocation, so it inherits the permanent-return capacity posture: a
-return never queues behind a layer's player limit.
+transferred by this lane and is answered NotMember. Living characters
+relocate; a dead flag-war participant takes the revival transaction with
+the anchor as its final destination. A failed preparation leaves the
+corpse and its anchor available for the next evacuation attempt.
 ================
 */
 func (rt *Runtime) ReturnCharacterFromInstance(division string, c *enterworld.Character) instance.Status {
@@ -241,7 +243,7 @@ The caller holds the division lock.
 ================
 */
 func (rt *Runtime) returnCharacterFromInstance(division string, c *enterworld.Character) instance.Status {
-	if c == nil || c.World == nil || c.World.InstanceReturn == nil {
+	if c == nil || c.World == nil || c.World.InstanceReturn == nil || rt.PushCharacterFrames == nil {
 		return instance.NotMember
 	}
 	leaving := instance.ID(domain.CharacterWorldInstance(c))
@@ -257,10 +259,24 @@ func (rt *Runtime) returnCharacterFromInstance(division string, c *enterworld.Ch
 		Z:        float64(anchor.Z),
 		Angle:    anchor.Angle,
 	}
-	if !rt.relocateCharacter(division, c, "instance-return", func() (travelPoint, bool) {
-		return travelPoint{spawn: entry, world: world}, true
-	}) {
-		return instance.NotMember
+	arrival := travelPoint{spawn: entry, world: world}
+	if !enterworld.CharacterAlive(c) && rt.flagWarResidentMatch(division, c) != nil {
+		result := rt.handleRebirthInDoor(division, c, rebirthRequest{
+			choice: wire.RebirthAtSpecifiedPoint, forceTown: true, returnTo: &arrival,
+		})
+		if len(result.Frames) == 0 {
+			return instance.NotMember
+		}
+		rt.PushCharacterFrames(division, c.Name, result.Frames)
+		if rt.PushDivisionPeerFrames != nil && len(result.Broadcast) > 0 {
+			rt.PushDivisionPeerFrames(division, c.Name, result.Broadcast)
+		}
+	} else {
+		if !rt.relocateCharacter(division, c, "instance-return", func() (travelPoint, bool) {
+			return arrival, true
+		}) {
+			return instance.NotMember
+		}
 	}
 	rt.deps.Update(c, "instance-return-anchor-clear", func() bool {
 		if c.World != nil {
@@ -417,12 +433,8 @@ ran, by this lane or by the programme that owns the layer).
 ================
 */
 func (rt *Runtime) instanceWorldRetiring(division string, lease instance.Lease) bool {
-	for _, retiring := range rt.Monsters.PendingPopulationRetirements(division) {
-		if retiring == lease {
-			return true
-		}
-	}
-	return false
+	retiring, _ := rt.Monsters.PopulationRetiring(division, lease)
+	return retiring
 }
 
 /*
