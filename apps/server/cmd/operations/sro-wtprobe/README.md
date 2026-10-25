@@ -84,9 +84,10 @@ and incomplete metric captures make `valid` false. An
 incomplete second scrape retains `metrics_before_if_incomplete` instead of
 presenting a zero-filled second observation. Tickets never enter the JSON.
 
-Exit status is 0 for a successful smoke or valid measurement, 1 for a failed
-arm, and 2 for invalid command usage. A measurement arm writes its JSON even
-on failure; diagnostics go to stderr.
+Exit status is 0 for a successful smoke or valid measurement. Flag parsing,
+missing required inputs and invalid measurement schedules exit 2; remaining
+configuration, connection and arm failures exit 1. A measurement arm writes
+its JSON even on failure; diagnostics go to stderr.
 
 ## Evidence scope
 
