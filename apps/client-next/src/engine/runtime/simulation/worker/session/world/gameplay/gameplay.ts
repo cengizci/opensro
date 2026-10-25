@@ -284,12 +284,16 @@ import { createChat } from "./chat/chat";
 import { createFriends } from "./friends/friends";
 import { createLetters } from "./letters/letters";
 import { createMovement } from "./movement/movement";
-import { createArrowKeys, type ArrowKeyMover } from "./arrow-keys/arrow-keys";
-import { logoutCancelRequest, worldPointAction } from "@/engine/foundation/gameplay/direction-movement";
+import { createArrowKeys, type ArrowGate, type ArrowKeyMover } from "./arrow-keys/arrow-keys";
+import {
+	logoutCancelRequest,
+	targetActionCancel,
+	worldPointAction
+} from "@/engine/foundation/gameplay/direction-movement";
 import { createInventory } from "./inventory/inventory";
 import { createCombat } from "./combat/combat";
 import { createTargeting } from "./targeting/targeting";
-import { createMoveReservation } from "./reservation/reservation";
+import { createMoveReservation, type GroundCommand } from "./reservation/reservation";
 import { createBetaPlayerMap } from "./beta-map/beta-map";
 import { createUniqueDamageRank } from "./unique-rank/unique-rank";
 import { createPetTraining } from "./pet-training/pet-training";
@@ -485,6 +489,10 @@ export function createGameplay(
 	let groundSkillMoveSuppressUntil = 0;
 	// groundWalkRefusal() was null at the last step (published, #1440).
 	let walkPredictable = false;
+	// The last step's refusal was a holding gate (cast, suppress): a click
+	// now is held and walks at release, not refused (published, #1570, so
+	// the mover can record the click's aim for adoption).
+	let walkHeld = false;
 	// pickupPredictableNow() held at the last step (published, #1567).
 	let pickupPredictable = false;
 	const feedback = createFeedback();
@@ -513,6 +521,20 @@ sendFrame
 	const arrowKeys = createArrowKeys( frame => sendFrame( frame ) );
 	/*
 	================
+	arrowGate
+
+	The arrow keys' gate (arrow-keys.ts ArrowGate): the ground click's own,
+	where a cast's hold ([player+0x644] bit 2, action state 2) is told
+	apart: its press cancels the cast and waits held (0x693190, #1589).
+	================
+	*/
+	function arrowGate( now: number, local: EntityState | undefined ): ArrowGate {
+		const refusal = groundWalkRefusal( now, local );
+		if ( refusal === null ) return "open";
+		return refusal === "cast" ? "cast" : "closed";
+	}
+	/*
+	================
 	arrowMover
 
 	What the arrow keys move: the movement owner, or for a rider the ridden
@@ -530,6 +552,14 @@ sendFrame
 			direct: ( heading, now ) => movement.direct( heading, now, vehicle ),
 			steer: ( heading, now ) => movement.steer( heading, now ),
 			stop: now => movement.stopDirection( now ),
+			// 0x693190: 0x67D140 holds the request back with two or more
+			// commands queued.
+			cancelCast: () => {
+				if ( actionSession.queued() >= 2 ) return false;
+				sendFrame( targetActionCancel() );
+				actionSession.sentCancellation();
+				return true;
+			},
 			vehicle: () => vehicle
 		};
 	}
@@ -927,14 +957,49 @@ scroll's kind-0 row does not.
 		if ( !local ) return "absent";
 		if ( local.appearanceState?.[0] === 2 ) return "dead";
 		if ( combat.guidedActive( localGid, now ) ) return "guided";
+		// Seated outranks the suppress window: the native handler stands
+		// before any goal is stored, so a seated click is never the held
+		// kind the mover records (#1570).
+		if ( local.movementMode === MOVEMENT_SEATED ) return "seated";
 		if ( now < groundSkillMoveSuppressUntil ) return "suppressed";
 		if ( teleportMode === 1 ) return "teleport";
 		if ( interactionBlocked() ) return "blocked";
 		if ( frozen() ) return "frozen";
-		if ( local.movementMode === MOVEMENT_SEATED ) return "seated";
 		if ( castLocked( now ) ) return "cast";
 		if ( local.mountedOn && (!activeCos || activeCos.gid !== local.mountedOn || activeCos.dead) ) return "mounted";
 		return null;
+	}
+	/*
+	================
+	holdGroundClick
+
+Resolves a ground click at click time and holds it in the move
+reservation until every gate that held it clears (step's release): its
+ray belongs to the camera at click time, and the destination marker
+appears when the player clicks. A direction pick holds the raw command,
+re-resolved at release from wherever the player then stands.
+	================
+	*/
+	function holdGroundClick( command: GameplayCommand ): void {
+		if ( command.kind !== "move" && command.kind !== "ground-move" ) return;
+		let held: GroundCommand = command;
+		let decalPose = command.kind === "move" ? { ...command.destination } : null;
+		if ( command.kind === "ground-move" ) {
+			const state = movement.state();
+			if ( !state.pose ) return;
+			const action = worldPointAction( state.pose, movement.pick( command.query ), command.query, false );
+			if ( action.kind === "none" ) return;
+			if ( action.kind === "walk-to" ) {
+				held = { kind: "move", destination: action.destination };
+				decalPose = { ...action.destination };
+			}
+		}
+		// The release replays the click through StartGroundMove's NPC test
+		// (878600); one it refuses now holds nothing and draws no marker.
+		if ( held.kind === "move" && npcRefusesWalk( held.destination, worldReferences.npcs() ) ) return;
+		moveReservation.hold( held );
+		selectionDecal = decalPose ? { kind: "ground", pose: decalPose } : null;
+		dirty = true;
 	}
 	/*
 ================
@@ -1378,6 +1443,7 @@ selected entities, cooldowns or world-entry state.
 		journalBag = new Map();
 		groundSkillMoveSuppressUntil = 0;
 		walkPredictable = false;
+		walkHeld = false;
 		moveReservation.clear();
 		betaMap.clear();
 		uniqueRank.clear();
@@ -1995,8 +2061,17 @@ state here before a command can claim a native wire conversation.
 			) return null;
 			if (
 				now < groundSkillMoveSuppressUntil &&
-				(command.kind === "move" || command.kind === "ground-move")
-			) return null;
+				(command.kind === "move" || command.kind === "ground-move") &&
+				local?.movementMode !== MOVEMENT_SEATED
+			) {
+				// The 500 ms send cooldown (+0x48) holds the click's goal,
+				// as the native controller holds it: the click walks at
+				// the window's end instead of dying here. A seated click
+				// falls through: the native handler stands before any goal
+				// is stored (0x6933bd), window or not.
+				holdGroundClick( command );
+				return null;
+			}
 			if (
 				teleportMode === 1 && [ "move", "ground-move", "attack", "skill", "pickup" ].includes( command.kind )
 			) return null;
@@ -2340,12 +2415,16 @@ state here before a command can claim a native wire conversation.
 				if ( command.kind === "ground-move" && command.departing ) sendFrame( logoutCancelRequest() );
 			}
 			if ( frozen() && [ "move", "ground-move" ].includes( command.kind ) ) return null;
-			// 6933a6 ground click / 692d19 entity click: seated interaction
-			// requests stand and RETURNS. It must not also predict travel.
+			// 693392..6933bd ground click / 692d07..692d1e entity click:
+			// seated interaction requests stand and RETURNS before any
+			// goal is stored, so the click is dropped, not walked later;
+			// it must not also predict travel.
 			if (
 				local?.movementMode === MOVEMENT_SEATED &&
 				[ "move", "ground-move", "select", "attack", "pickup" ].includes( command.kind )
-			) return sendFrame( { opcode: 0x7017, payload: Uint8Array.of( 4 ) } );
+			) {
+				return sendFrame( { opcode: 0x7017, payload: Uint8Array.of( 4 ) } );
+			}
 
 			if (
 				command.kind === "party-match-page" || command.kind === "party-match-join" ||
@@ -2953,8 +3032,13 @@ state here before a command can claim a native wire conversation.
 			if ( command.kind === "arrow-key" ) {
 				// 0x680A30: a press walks only where a click would (the same
 				// gates); a release always ends what its press started.
-				const admitted = !command.down || groundWalkRefusal( now, local ) === null;
-				const frame = arrowKeys.key( command.key, command.down, now, arrowMover( local ), admitted );
+				const frame = arrowKeys.key(
+					command.key,
+					command.down,
+					now,
+					arrowMover( local ),
+					arrowGate( now, local )
+				);
 				if ( frame ) {
 					pickup.clear();
 					selectionDecal = null;
@@ -2967,30 +3051,7 @@ state here before a command can claim a native wire conversation.
 					throw new Error( "Server does not support simulation protocol 1" );
 				}
 				if ( castLocked( now ) ) {
-					// Resolve the click now, not when the cast releases: its ray belongs
-					// to the camera at click time, and the destination marker appears
-					// when the player clicks. A direction walk keeps its query.
-					let held: typeof command = command;
-					if ( command.kind === "ground-move" ) {
-						const state = movement.state();
-						if ( !state.pose ) return null;
-						const action = worldPointAction(
-							state.pose,
-							movement.pick( command.query ),
-							command.query,
-							false
-						);
-						if ( action.kind === "none" ) return null;
-						if ( action.kind === "walk-to" ) held = { kind: "move", destination: action.destination };
-					}
-					// The release replays the click through StartGroundMove's NPC test
-					// (below); one it refuses now holds nothing and draws no marker.
-					if ( held.kind === "move" && npcRefusesWalk( held.destination, worldReferences.npcs() ) ) {
-						return null;
-					}
-					moveReservation.hold( held );
-					selectionDecal = held.kind === "move" ? { kind: "ground", pose: { ...held.destination } } : null;
-					dirty = true;
+					holdGroundClick( command );
 					return null;
 				}
 				if ( local?.mountedOn && (!activeCos || activeCos.gid !== local.mountedOn || activeCos.dead) ) {
@@ -3012,6 +3073,8 @@ state here before a command can claim a native wire conversation.
 					if ( action.kind === "none" ) return null;
 					if ( action.kind === "walk-direction" ) {
 						const frame = movement.direct( action.heading, now, cosGid );
+						// A walk that starts now supersedes any held click.
+						moveReservation.clear();
 						pickup.clear();
 						selectionDecal = null;
 						return frame;
@@ -3021,6 +3084,7 @@ state here before a command can claim a native wire conversation.
 				if ( !destination ) return null;
 				// 878600: a point within 20 units of an NPC or guard starts no walk.
 				if ( npcRefusesWalk( destination, worldReferences.npcs() ) ) return null;
+				moveReservation.clear();
 				const frame = movement.request( destination, now, cosGid );
 				pickup.clear();
 				selectionDecal = { kind: "ground", pose: { ...destination } };
@@ -4747,12 +4811,21 @@ before take assembles the presentation snapshot.
 		*/
 		step( now: number, local?: EntityState ) {
 			inventorySince = inventory.state().inventoryPending ? inventorySince ?? now : undefined;
-			arrowKeys.step( now, arrowMover( local ) );
+			if ( arrowKeys.step( now, arrowMover( local ), arrowGate( now, local ) === "open" ) ) {
+				pickup.clear();
+				selectionDecal = null;
+			}
+			// A turn changes the facing every tick, walking or standing: publish
+			// it (a standing turn moves nothing else that would).
+			if ( arrowKeys.rate() ) dirty = true;
 			// A gate can open or close with no command or frame (a cast's action
 			// window ends): republish when the answer changes.
-			const predictable = groundWalkRefusal( now, local ) === null;
-			if ( predictable !== walkPredictable ) {
+			const refusal = groundWalkRefusal( now, local );
+			const predictable = refusal === null;
+			const held = refusal === "cast" || refusal === "suppressed";
+			if ( predictable !== walkPredictable || held !== walkHeld ) {
 				walkPredictable = predictable;
+				walkHeld = held;
 				dirty = true;
 			}
 			const pickupOpen = !!local && pickupPredictableNow( now, local );
@@ -4814,11 +4887,13 @@ before take assembles the presentation snapshot.
 			) {
 				sendFrame( frame );
 			}
-			// A click held through the cast walks as soon as the caster leaves
-			// action state 2 (the skill's action window ends or it is cancelled);
-			// death forfeits it.
+			// A held click walks as soon as every gate that held it clears:
+			// the caster leaves action state 2 (the skill's action window
+			// ends or it is cancelled) and the ground-skill suppress window
+			// runs out. Death forfeits it.
 			if (
-				moveReservation.holding() && !castLocked( now )
+				moveReservation.holding() && !castLocked( now ) &&
+				now >= groundSkillMoveSuppressUntil
 			) {
 				const held = moveReservation.take()!;
 				if ( !local || local.appearanceState?.[0] === 2 ) {
@@ -5142,7 +5217,10 @@ The published plane when something changed since the last take, else null.
 				revision: ++revision,
 				localGid,
 				...m,
+				movementTurnRate: arrowKeys.rate(),
 				walkPredictable,
+				walkHeld,
+				moveHeld: moveReservation.holding(),
 				pickupPredictable,
 				...i,
 				inventoryJournal,
@@ -5179,6 +5257,7 @@ World transfer retires spatial work while retaining character/session data.
 			cosPickup.clear();
 			groundSkillMoveSuppressUntil = 0;
 			walkPredictable = false;
+			walkHeld = false;
 			moveReservation.clear();
 			quests.clearGathering();
 			approach = interactionApproachTransition( approach, { kind: "cancel" } );
