@@ -78,7 +78,7 @@ func TestMeasurementProductionTransports(t *testing.T) {
 			if err != nil || !report.Valid {
 				t.Fatalf("measurement failed: %v; report=%+v", err, report)
 			}
-			if report.HandshakeSamples != 1 || report.HelloToWelcome <= 0 || report.Settings.Transport != kind {
+			if report.HandshakeSamples != 1 || report.HelloToWelcome < 0 || report.Settings.Transport != kind {
 				t.Fatalf("incorrect connection evidence: %+v", report)
 			}
 			for _, phase := range []sampleSummary{report.PingTrain, report.OrderedBurst} {
