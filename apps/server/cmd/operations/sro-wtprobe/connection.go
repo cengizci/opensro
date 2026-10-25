@@ -305,15 +305,19 @@ func (client *probeClient) replyPing(frame transport.Frame) error {
 ================
 interrupt
 
-Interrupt only our own pending I/O. Reader finalization can distinguish
-these local-close/deadline errors from protocol failures already decoded.
+Interrupt pending I/O without starting peer-visible TLS shutdown. Closing
+a TLS socket here can make a proxy send a normal WebSocket close before
+our reader joins. The ordinary close belongs after that join.
 ================
 */
 func (client *probeClient) interrupt() error {
+	var err error
 	if client.ws != nil {
-		return client.ws.UnderlyingConn().Close()
+		err = client.ws.UnderlyingConn().SetDeadline(time.Now())
+	} else {
+		err = client.stream.SetDeadline(time.Now())
 	}
-	if err := client.stream.SetDeadline(time.Now()); err != nil {
+	if err != nil {
 		client.close()
 		return err
 	}

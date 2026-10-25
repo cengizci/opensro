@@ -18,7 +18,40 @@ import (
 	"net"
 	"os"
 	"testing"
+
+	"github.com/gorilla/websocket"
 )
+
+/*
+================
+probeHiddenTimeout
+
+Gorilla exposes timeouts through net.Error without unwrapping the original
+deadline error. Model that observable contract rather than its source text.
+================
+*/
+type probeHiddenTimeout struct{}
+
+/*
+================
+Error
+================
+*/
+func (*probeHiddenTimeout) Error() string { return "probe I/O deadline" }
+
+/*
+================
+Timeout
+================
+*/
+func (*probeHiddenTimeout) Timeout() bool { return true }
+
+/*
+================
+Temporary
+================
+*/
+func (*probeHiddenTimeout) Temporary() bool { return false }
 
 /*
 ================
@@ -36,6 +69,8 @@ func TestMeasurementFinalizationPreservesReaderFailures(t *testing.T) {
 		{"peer_eof", io.EOF, true},
 		{"local_close", net.ErrClosed, false},
 		{"local_deadline", os.ErrDeadlineExceeded, false},
+		{"hidden_deadline", &probeHiddenTimeout{}, false},
+		{"remote_normal_close", &websocket.CloseError{Code: websocket.CloseNormalClosure, Text: "peer closed"}, true},
 	} {
 		for _, delayed := range []bool{false, true} {
 			name := test.name + "/before_stop"

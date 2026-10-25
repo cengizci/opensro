@@ -314,11 +314,15 @@ completeRead
 
 Only I/O errors produced by our explicit stop are expected. Protocol
 failures remain failures even if their publication races with shutdown.
+Gorilla exposes a timeout as net.Error without unwrapping its deadline;
+that observable timeout contract must also be recognized after our stop.
 ================
 */
 func (recorder *probeRecorder) completeRead(err error) {
 	recorder.mu.Lock()
-	if recorder.stopping && (errors.Is(err, net.ErrClosed) || errors.Is(err, os.ErrDeadlineExceeded)) {
+	var timeout net.Error
+	deadline := errors.Is(err, os.ErrDeadlineExceeded) || errors.As(err, &timeout) && timeout.Timeout()
+	if recorder.stopping && (errors.Is(err, net.ErrClosed) || deadline) {
 		err = nil
 	}
 	recorder.readError = err
