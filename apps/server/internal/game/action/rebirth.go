@@ -287,22 +287,7 @@ func (rt *Runtime) HandleLocalRebirth(
 
 	unlock := rt.lockDivision(divisionID)
 	defer unlock()
-	return rt.handleRebirthInDoor(divisionID, character, rebirthRequest{choice: choice})
-}
-
-/*
-================
-rebirthRequest
-
-An ordinary choice, a corpse-clock town return, or an event's final return
-point. returnTo contracts the event's town revival and subsequent return
-into one prepared entry, so a failed return cannot strand a revived player.
-================
-*/
-type rebirthRequest struct {
-	choice    byte
-	forceTown bool
-	returnTo  *travelPoint
+	return rt.handleRebirthInDoor(divisionID, character, choice, false)
 }
 
 /*
@@ -310,9 +295,7 @@ type rebirthRequest struct {
 handleRebirthInDoor
 
 The settled corpse's revival, with the caller holding the division
-door. forceTown bypasses the camp and present-point choices: the corpse
-clock's expiry (advanceSiegeCorpses) and the event's return queue name
-their destination without asking the player.
+door. forceTown is the corpse clock's expiry (advanceSiegeCorpses):
 CGObjPC_OnTick sends the run-out corpse to town directly
 (CGObjPC_TeleportToTown 4DF290), so a death that would revive where
 it fell still goes to town and the choice must already name the town
@@ -322,7 +305,8 @@ point. Every other caller takes the player's own choice.
 func (rt *Runtime) handleRebirthInDoor(
 	divisionID string,
 	character *enterworld.Character,
-	request rebirthRequest,
+	choice byte,
+	forceTown bool,
 ) OpResult {
 
 	// Prepare the complete destination projection while still dead. No durable
@@ -346,11 +330,10 @@ func (rt *Runtime) handleRebirthInDoor(
 	// it fell at any level, whatever the choice; otherwise the present point
 	// is a beginner's (level 10 or below, 51017F). The shard may set the town
 	// rule for team deaths too (teamdeath.go).
-	choice := request.choice
 	var camp *flagWarMatch
 	var arrival travelPoint
 	matchRebirth := false
-	if !request.forceTown {
+	if !forceTown {
 		if match := rt.flagWarResidentMatch(divisionID, before); match != nil {
 			matchRebirth = true
 			choice = wire.RebirthAtSpecifiedPoint
@@ -364,7 +347,7 @@ func (rt *Runtime) handleRebirthInDoor(
 	// The finished match returns to town; a team-death or beginner choice
 	// must not revive inside a layer whose evacuation is already underway.
 	inPlace := !matchRebirth && rt.revivesInPlace(before.DeathKind)
-	if inPlace && !request.forceTown {
+	if inPlace && !forceTown {
 		choice = wire.RebirthAtPresentPoint
 	}
 	if choice == wire.RebirthAtPresentPoint && !inPlace && before.Level != nil && *before.Level > 10 {
@@ -383,7 +366,6 @@ func (rt *Runtime) handleRebirthInDoor(
 	var previousPets map[petOwnerKey]petSession
 	currentWorld := instance.ID(domain.CharacterWorldInstance(before))
 	arrivalWorld := currentWorld
-	protectionWorld := currentWorld
 	var membership populationAdmission
 	committed := false
 	defer func() {
@@ -397,13 +379,6 @@ func (rt *Runtime) handleRebirthInDoor(
 	if choice == wire.RebirthAtSpecifiedPoint {
 		if camp == nil {
 			arrival = rt.appointedRebirth(divisionID, before)
-		}
-		protectionWorld = arrival.world
-		if request.returnTo != nil {
-			// Inference: publish the event's revival and return as one atomic
-			// entry. Its grace still belongs to the town revival, before the
-			// final return, even when the captured anchor is a siege world.
-			arrival = *request.returnTo
 		}
 		destination = arrival.spawn
 		preview := corpse
@@ -455,14 +430,11 @@ func (rt *Runtime) handleRebirthInDoor(
 		character.CurrentHP, character.CurrentMP = &restoredHP, &restoredMP
 		character.LastExpLoss = 0 // CGObjPC_TeleportToTown 4DF2E8
 		character.DeathKind = 0   // CGObjPC_TeleportToTown 4DF2EE
-		if request.returnTo != nil {
-			character.World.InstanceReturn = nil
-		}
 		// The re-entry presents any waiting inventory expansion; the record
 		// adopts the capacity those packets carry (zero for a present-point
 		// rebirth, which builds no entry).
 		character.AdoptInventorySize(prepared.InventorySize)
-		untouchable = rt.grantReviveUntouchableInWorld(divisionID, character, protectionWorld, rt.Now().UnixMilli())
+		untouchable = rt.grantReviveUntouchable(divisionID, character, rt.Now().UnixMilli())
 		return true
 	})
 	if !accepted {

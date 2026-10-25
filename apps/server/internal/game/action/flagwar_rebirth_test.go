@@ -3,10 +3,11 @@
 
 flagwar_rebirth_test.go - camp revival and the match's final return
 
-The public rebirth and instance-close lanes must keep the match lease,
-revive atomically, and rebuild only the returning player's arena scene.
-These fixtures use level-one keepers and the ordinary prepared re-entry;
-no licensed game data or running transport is needed.
+The public rebirth lane must keep the match lease, revive atomically, and
+rebuild only the returning player's arena scene. Closing the instance is
+ordinary relocation, including for a corpse; it never grants a revival.
+These fixtures use level-one keepers and need no licensed game data or
+running transport.
 
 ===========================================================================
 */
@@ -509,10 +510,61 @@ func TestFlagWarCampReentryKeepsLiveCompanionsAndRetiresCorpses(t *testing.T) {
 
 /*
 ================
-TestFlagWarCloseRevivesDeadResidentsAndOnlyRelocatesLivingResidents
+requireOrdinaryReturn
+
+Evacuation owns placement and anchor cleanup, not life or recovery. Check
+the actual private re-entry and peer publication as well as the keeper.
 ================
 */
-func TestFlagWarCloseRevivesDeadResidentsAndOnlyRelocatesLivingResidents(t *testing.T) {
+func (f *flagWarRebirthFixture) requireOrdinaryReturn(t *testing.T, c, before *enterworld.Character, world simulation.WorldState) {
+	t.Helper()
+	if before.World == nil || before.World.InstanceReturn == nil {
+		t.Fatal("fixture lacks its original return anchor")
+	}
+	anchor := before.World.InstanceReturn
+	want := simulation.Spawn{RegionID: anchor.RegionID, X: float64(anchor.X), Y: float64(anchor.Y), Z: float64(anchor.Z), Angle: anchor.Angle}
+	if domain.CharacterWorldInstance(c) != anchor.PackedInstance || c.World.InstanceReturn != nil || f.world(c).Spawn != want {
+		t.Fatalf("final return lost its captured anchor: %+v", c.World)
+	}
+	if !reflect.DeepEqual(c.CurrentHP, before.CurrentHP) || !reflect.DeepEqual(c.CurrentMP, before.CurrentMP) ||
+		enterworld.CharacterAlive(c) != enterworld.CharacterAlive(before) || c.DeathKind != before.DeathKind ||
+		c.LastExpLoss != before.LastExpLoss || !reflect.DeepEqual(c.World.LastDeathPoint, before.World.LastDeathPoint) ||
+		c.NativeBodyStatus != before.NativeBodyStatus || c.BodyStatusOwner != before.BodyStatusOwner ||
+		f.world(c).LifeRevision != world.LifeRevision {
+		t.Fatal("ordinary return changed life, vitals, death record or body protection")
+	}
+	frames := f.rig.pushed[c.Name]
+	if len(frames) == 0 || frames[0].Opcode != enterworld.OpcodeResetClient {
+		t.Fatal("ordinary return did not publish its re-entry")
+	}
+	for _, frame := range frames {
+		if frame.Opcode == wire.OpFlagWarEvent {
+			t.Fatal("final return replayed an arena scene after leaving")
+		}
+		if frame.Opcode != wire.OpObjectStateRefresh {
+			continue
+		}
+		state, err := wire.DecodeObjectStateRefresh(frame.Payload)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if state.StateType == wire.StateChannelBody && state.Value == untouchableBodyStatus ||
+			!enterworld.CharacterAlive(before) && state.StateType == wire.StateChannelLife && state.Value == wire.LifeStateAlive {
+			t.Fatal("ordinary return published a revival or new untouchable grant")
+		}
+	}
+	peers := f.peers[c.Name]
+	if len(peers) != 1 || peers[0].Opcode != wire.OpObjectSourceCorrection {
+		t.Fatalf("ordinary return peer publication=%+v, want only the relocation correction", peers)
+	}
+}
+
+/*
+================
+TestFlagWarCloseOnlyRelocatesDeadAndLivingResidents
+================
+*/
+func TestFlagWarCloseOnlyRelocatesDeadAndLivingResidents(t *testing.T) {
 	for _, dead := range []bool{false, true} {
 		t.Run(fmt.Sprintf("dead-%v", dead), func(t *testing.T) {
 			f := newFlagWarRebirthFixture(t)
@@ -523,27 +575,9 @@ func TestFlagWarCloseRevivesDeadResidentsAndOnlyRelocatesLivingResidents(t *test
 				c.CurrentHP, c.CurrentMP = testInt64(17), testInt64(9)
 			}
 			before := c.Snapshot()
-			anchor := *c.World.InstanceReturn
 			world := f.world(c)
 			f.rig.rt.CloseInstanceWorld(testDivision, f.match.lease)
-			if domain.CharacterWorldInstance(c) != anchor.PackedInstance || c.World.InstanceReturn != nil ||
-				f.world(c).Spawn != flagWarMatchTestStartPose {
-				t.Fatalf("final return lost its captured anchor: %+v", c.World)
-			}
-			if dead {
-				f.requireReborn(t, c, OpResult{Frames: f.rig.pushed[c.Name], Broadcast: f.peers[c.Name]}, flagWarMatchTestStartPose)
-				if f.world(c).LifeRevision != world.LifeRevision+1 {
-					t.Fatal("dead return did not own exactly one life transition")
-				}
-			} else if *c.CurrentHP != *before.CurrentHP || *c.CurrentMP != *before.CurrentMP ||
-				c.NativeBodyStatus != before.NativeBodyStatus || f.world(c).LifeRevision != world.LifeRevision {
-				t.Fatal("living return changed life, vitals or native body status")
-			}
-			for _, frame := range f.rig.pushed[c.Name] {
-				if frame.Opcode == wire.OpFlagWarEvent {
-					t.Fatal("final return replayed an arena scene after leaving")
-				}
-			}
+			f.requireOrdinaryReturn(t, c, before, world)
 			if _, open := f.rig.rt.Monsters.PopulationLease(testDivision, f.match.lease.ID); open {
 				t.Fatal("an evacuated layer was not released")
 			}
@@ -553,23 +587,23 @@ func TestFlagWarCloseRevivesDeadResidentsAndOnlyRelocatesLivingResidents(t *test
 
 /*
 ================
-TestFlagWarEndReturnPreparationFailureKeepsRetryContext
+TestFlagWarEndReturnReentryFailureKeepsRetryContext
 ================
 */
-func TestFlagWarEndReturnPreparationFailureKeepsRetryContext(t *testing.T) {
-	for _, failure := range []string{"prepare-failure", "character-mutation"} {
-		t.Run(failure, func(t *testing.T) {
+func TestFlagWarEndReturnReentryFailureKeepsRetryContext(t *testing.T) {
+	for _, dead := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dead-%v", dead), func(t *testing.T) {
 			f := newFlagWarRebirthFixture(t)
 			c := f.players[0]
-			corpse := f.settleCorpse(c, pk.DeathMonster)
+			if dead {
+				f.settleCorpse(c, pk.DeathMonster)
+			} else {
+				c.CurrentHP, c.CurrentMP = testInt64(17), testInt64(9)
+			}
+			world := f.world(c)
 			before := c.Snapshot()
 			deps := f.rig.rt.deps
-			wrapper := failedRebirthPreparation{Dependencies: deps}
-			if failure == "character-mutation" {
-				wrapper.mutate = func() { c.Gold = testInt64(12345) }
-				before.Gold = testInt64(12345)
-			}
-			f.rig.rt.deps = wrapper
+			f.rig.rt.deps = portalRejectEntry{Dependencies: deps}
 			f.rig.clock.now = time.UnixMilli(f.match.endsMs)
 			f.rig.rt.advanceFlagWarMatches(f.rig.clock.NowMs())
 			if f.match.closeMs == 0 {
@@ -577,27 +611,32 @@ func TestFlagWarEndReturnPreparationFailureKeepsRetryContext(t *testing.T) {
 			}
 			f.rig.clock.now = time.UnixMilli(f.match.closeMs)
 			f.rig.rt.advanceFlagWarMatches(f.rig.clock.NowMs())
-			if !reflect.DeepEqual(c.Snapshot(), before) || !reflect.DeepEqual(f.world(c), corpse) || len(f.rig.pushed[c.Name]) != 0 {
-				t.Fatal("failed dead return partially revived, relocated or published")
+			after := f.world(c)
+			if !reflect.DeepEqual(c.Snapshot(), before) || after.Spawn != world.Spawn || after.LifeRevision != world.LifeRevision ||
+				!reflect.DeepEqual(after.MoveSegment, world.MoveSegment) ||
+				len(f.rig.pushed[c.Name]) != 0 || len(f.peers[c.Name]) != 0 {
+				t.Fatal("failed return changed life, placement, anchor or publication")
 			}
 			if f.rig.rt.flagWarMatchFor(testDivision) != f.match {
-				t.Fatal("a failed evacuation discarded the match's dead-return policy")
+				t.Fatal("a failed evacuation discarded the occupied match")
 			}
 			if lease, open := f.rig.rt.Monsters.PopulationLease(testDivision, f.match.lease.ID); !open || lease != f.match.lease {
-				t.Fatal("a failed dead return released its occupied layer")
+				t.Fatal("a failed return released its occupied layer")
+			}
+			if lease, admitted := f.rig.rt.EntryPopulationLease(testDivision, c.Name); !admitted || lease != f.match.lease {
+				t.Fatal("a failed return lost its original admission")
 			}
 			f.rig.rt.deps = deps
 			f.rig.rt.TickHook()(f.rig.clock.NowMs() + 1)
-			if !enterworld.CharacterAlive(c) || c.World.InstanceReturn != nil || domain.CharacterWorldInstance(c) != domain.DefaultWorldInstance ||
-				f.world(c).Spawn != flagWarMatchTestStartPose || f.world(c).LifeRevision != corpse.LifeRevision+1 {
-				t.Fatalf("tick did not retry the atomic dead return: world=%+v hp=%v", c.World, c.CurrentHP)
-			}
+			f.requireOrdinaryReturn(t, c, before, world)
 			if f.rig.rt.flagWarMatchFor(testDivision) != nil {
 				t.Fatal("successful retry kept a released match")
 			}
-			committed, world := c.Snapshot(), f.world(c)
+			committed, returnedWorld := c.Snapshot(), f.world(c)
 			f.rig.rt.TickHook()(f.rig.clock.NowMs() + 2)
-			if !reflect.DeepEqual(c.Snapshot(), committed) || !reflect.DeepEqual(f.world(c), world) {
+			after = f.world(c)
+			if !reflect.DeepEqual(c.Snapshot(), committed) || after.Spawn != returnedWorld.Spawn ||
+				after.LifeRevision != returnedWorld.LifeRevision || !reflect.DeepEqual(after.MoveSegment, returnedWorld.MoveSegment) {
 				t.Fatal("a later close tick committed the return twice")
 			}
 		})
@@ -606,36 +645,37 @@ func TestFlagWarEndReturnPreparationFailureKeepsRetryContext(t *testing.T) {
 
 /*
 ================
-TestFlagWarDeadReturnUsesTownGraceAtAFortressAnchor
+TestFlagWarReturnToFortressAddsNoRevivalGrace
 
-The event's logical town revival grants six seconds, even when the final
-captured return point belongs to a siege world. Teleport grace is off.
+The captured destination's siege duration must never turn a plain return
+into a revival grant. Teleport grace is off for both living and dead actors.
 ================
 */
-func TestFlagWarDeadReturnUsesTownGraceAtAFortressAnchor(t *testing.T) {
-	f := newFlagWarRebirthFixture(t)
-	c := f.players[0]
-	f.settleCorpse(c, pk.DeathMonster)
-	fortress := instance.Pack(2, 1)
-	if _, open := f.rig.rt.Monsters.PopulationLease(testDivision, fortress); !open {
-		if _, status := f.rig.rt.Monsters.AllocatePopulation(testDivision, fortress); status != instance.Success {
-			t.Fatalf("allocate permanent fortress population: %d", status)
-		}
-	}
-	c.World.InstanceReturn.PackedInstance = uint32(fortress)
-	f.rig.rt.CloseInstanceWorld(testDivision, f.match.lease)
-	if !enterworld.CharacterAlive(c) || domain.CharacterWorldInstance(c) != uint32(fortress) ||
-		c.World.InstanceReturn != nil || c.NativeBodyStatus != untouchableBodyStatus {
-		t.Fatalf("dead return to fortress anchor failed: %+v", c)
-	}
-	f.rig.clock.Advance(5999 * time.Millisecond)
-	f.rig.rt.TickHook()(f.rig.clock.NowMs())
-	if c.NativeBodyStatus != untouchableBodyStatus {
-		t.Fatal("town grace ended before six seconds")
-	}
-	f.rig.clock.Advance(time.Millisecond)
-	f.rig.rt.TickHook()(f.rig.clock.NowMs())
-	if c.NativeBodyStatus != 0 {
-		t.Fatalf("final siege anchor selected eleven-second grace: body=%d", c.NativeBodyStatus)
+func TestFlagWarReturnToFortressAddsNoRevivalGrace(t *testing.T) {
+	for _, dead := range []bool{false, true} {
+		t.Run(fmt.Sprintf("dead-%v", dead), func(t *testing.T) {
+			f := newFlagWarRebirthFixture(t)
+			c := f.players[0]
+			if dead {
+				f.settleCorpse(c, pk.DeathMonster)
+			} else {
+				c.CurrentHP, c.CurrentMP = testInt64(17), testInt64(9)
+			}
+			fortress := instance.Pack(2, 1)
+			if _, open := f.rig.rt.Monsters.PopulationLease(testDivision, fortress); !open {
+				if _, status := f.rig.rt.Monsters.AllocatePopulation(testDivision, fortress); status != instance.Success {
+					t.Fatalf("allocate permanent fortress population: %d", status)
+				}
+			}
+			c.World.InstanceReturn.PackedInstance = uint32(fortress)
+			before, world := c.Snapshot(), f.world(c)
+			f.rig.rt.CloseInstanceWorld(testDivision, f.match.lease)
+			f.requireOrdinaryReturn(t, c, before, world)
+			f.rig.clock.Advance(11000 * time.Millisecond)
+			f.rig.rt.TickHook()(f.rig.clock.NowMs())
+			if c.NativeBodyStatus != before.NativeBodyStatus || c.BodyStatusOwner != before.BodyStatusOwner {
+				t.Fatal("a plain return acquired a delayed revival grant")
+			}
+		})
 	}
 }

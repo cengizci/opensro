@@ -8,10 +8,16 @@ revival keeps the admitted layer and the return anchor. The full re-entry
 reconstructs the match-owned objects and HUD after the ordinary actor entry.
 
 The camp rule and geometry retain the flag-war audit's evidence (#887,
-#1385). Inference: use the existing specified-point revival's full vitals,
-grace and re-entry transaction, changing only its destination. The supplied
-v1.150 client has the ordinary rebirth choices, not a separate camp packet;
-no fresh reference-server packet-order verification is claimed here.
+#1385). The reference-server assembly review on #1616 confirms that the
+event's due return entry revives a dead participant with maximum HP/MP,
+revival grace and a teleport to the camp. It does not revive participants
+when the event ends. The v1.150 client uses the ordinary rebirth choices.
+
+Port choice: the due entry's insertion site and delay are unpinned, so the
+player's rebirth request triggers the camp revival. The existing revival
+owner supplies the full keeper vitals. Native also applies heal-reduction
+parameters; this path retains the ordinary revival owner's unreduced
+recovery until that shared heal behavior is ported.
 
 ===========================================================================
 */

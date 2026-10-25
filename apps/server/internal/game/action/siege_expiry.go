@@ -94,7 +94,7 @@ func (rt *Runtime) expireSiegeCorpseInDivision(division, name string, nowMs int6
 	if !siegeCorpseDue(c, nowMs) {
 		return nil
 	}
-	result := rt.handleRebirthInDoor(division, c, rebirthRequest{choice: wire.RebirthAtSpecifiedPoint, forceTown: true})
+	result := rt.handleRebirthInDoor(division, c, wire.RebirthAtSpecifiedPoint, true)
 	var out []simulation.DivisionFrames
 	if len(result.Frames) > 0 {
 		out = append(out, simulation.DivisionFrames{
